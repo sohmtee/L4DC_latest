@@ -8,6 +8,7 @@ class Trainer():
     def __init__(self, hyper_params, omega_star):
         self.hyper_params = hyper_params
         self.omega_star = omega_star
+        self.C = 10
 
     def generate_trajectory(self, theta):
         trajectory = []
@@ -48,15 +49,21 @@ class Trainer():
     def estimation_error(self, w_star, w_hat):
         return torch.norm(w_star - w_hat, p=2).item()
 
-    def compute_estimated_reward(self, w, trajectory):
+    def compute_optimistic_reward(self, w, trajectory, t):
         with torch.no_grad():
             phi = self.compute_feature_matrix(trajectory)  
             logits = phi @ w 
             probs = self.softmax(logits) 
             class_values = torch.arange(self.num_classes, dtype=torch.float32)
             reward = torch.sum(class_values * probs)
-            return reward.item()
-
+            t_tensor = torch.tensor(float(t), dtype=torch.float32)
+            confidence_bound = self.C * torch.sqrt(1/t_tensor)
+            optimistic_reward = torch.minimum(
+                reward + confidence_bound, 
+                torch.tensor(float(self.num_classes - 1))
+            )
+            return optimistic_reward.item()
+        
     def compute_policy_gradient(self, theta, trajectories, rewards):
         grad = np.zeros_like(theta)
         for traj, reward in zip(trajectories, rewards):
@@ -85,6 +92,7 @@ class Trainer():
             class_values = torch.arange(self.num_classes, dtype=torch.float32)
             reward = torch.sum(class_values * probs)
             return reward.item()
+        
         
     def project(self, w):
         B = self.hyper_params["B"]
@@ -163,7 +171,8 @@ class Trainer():
                     while True:
                         prev_theta = np.copy(theta)
                         trajectories = [self.generate_trajectory(theta) for _ in range(200)]
-                        rewards = [self.compute_estimated_reward(self.w_estimate, traj) for traj in trajectories]
+                        # rewards = [self.compute_estimated_reward(self.w_estimate, traj) for traj in trajectories]
+                        rewards = [self.compute_optimistic_reward(self.w_estimate, traj, t+1) for traj in trajectories]
 
                         grad = self.compute_policy_gradient(theta, trajectories, rewards)
                         theta += self.hyper_params["alpha"] * grad
@@ -200,9 +209,9 @@ class Trainer():
 
 if __name__ == "__main__":
     hyper_params = {}
-    hyper_params["grid_size"] = 4
+    hyper_params["grid_size"] = 8
     hyper_params["coins_count"] = 1
-    hyper_params["horizon"] = 25
+    hyper_params["horizon"] = 50
     hyper_params["tolerance"] = 1e-7
     hyper_params["seed"] = 1235
     hyper_params["env_seed"] = hyper_params["seed"]
@@ -212,7 +221,7 @@ if __name__ == "__main__":
     hyper_params["alpha"] = 0.001
     hyper_params["B"] = 1000
 
-    hyper_params["T"] = 2000
+    hyper_params["T"] = 7000
     hyper_params["update_interval"]= 100
     hyper_params["uniform_policy"] = False
     hyper_params["use_env_reward"] = False
@@ -225,13 +234,14 @@ if __name__ == "__main__":
     
 
 
-    # K = 4, coin = 1 (new)
+    # K = 4, coin = 1
     omega_star = torch.as_tensor(np.array([-1.9108, -3.7382, -1.9097,  6.5837, -0.6338,  5.3681,  7.1738,  6.0408,
         -1.5342, -8.6076, -0.1140,  0.0766, -3.8470, -2.7990,  8.0839, -3.3415,
         -3.5125, -0.2810, -2.2345,  1.1508]), dtype=torch.float32)
-
     
-    num_runs = 2
+
+   
+    num_runs = 1
     trainer = Trainer(hyper_params, omega_star)
     reward_all_runs = trainer.run_full_algorithm(num_runs)
     print(trainer.w_estimate)
@@ -240,14 +250,18 @@ if __name__ == "__main__":
     avg_rewards = np.mean(reward_all_runs, axis=0)
     std_rewards = np.std(reward_all_runs, axis=0)
     
-    plt.figure()
+    plt.figure(figsize=(10, 6))
+
+    plt.rcParams['font.family'] = 'Times New Roman'
     plt.plot(range(hyper_params["T"]), avg_rewards, label='Average True Reward')
     plt.fill_between(range(hyper_params["T"]),
                      avg_rewards - 2 * std_rewards,
                      avg_rewards + 2 * std_rewards,
                      color='b', alpha=0.2, label="95% Confidence Interval")
-    plt.xlabel('Episodes')
-    plt.ylabel('Average True Reward')
-    plt.title('Average Reward vs. Episodes')
-    plt.legend()
+    plt.xlabel('Episodes', fontsize=20)
+    plt.ylabel('Average True Reward', fontsize=20)
+    plt.title('Average Reward vs. Episodes', fontsize=20)
+    plt.legend(fontsize=18)
+    plt.xticks(fontsize=18)
+    plt.yticks(fontsize=18)
     plt.show()
