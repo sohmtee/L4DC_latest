@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 import gymnasium as gym
 from env import GridEnv
+import json
+import os
 class Trainer():
     def __init__(self, hyper_params, omega_star):
         self.hyper_params = hyper_params
@@ -145,65 +147,63 @@ class Trainer():
 
     ##########  w update at intervals to speed up run  ###########
 
-    def run_full_algorithm(self, num_runs):
+    def run_full_algorithm(self, run_seed):
         T = self.hyper_params["T"]
-        reward_all_runs = np.zeros((num_runs, T))
-        # est_errors_all_runs = np.zeros((num_runs, T))
-        self.rng = np.random.default_rng(seed=self.hyper_params["seed"])
-        torch.manual_seed(self.hyper_params["seed"])
+        rewards = np.zeros(T)
+        
+        self.rng = np.random.default_rng(seed=run_seed)
+        torch.manual_seed(run_seed)
         self.env = GridEnv(self.hyper_params["grid_size"], self.hyper_params["coins_count"], self.hyper_params["horizon"])
-        self.env.reset(seed=self.hyper_params["env_seed"])
+        self.env.reset(seed=run_seed)
         self.num_actions = self.env.action_space.n
         self.feature_dim = self.env.feature_dim
         self.num_classes = self.env.reward_classes
 
-        for run in range(num_runs):
-            print(f'Run {run+1}/{num_runs}')
-            theta = torch.as_tensor(self.rng.random((self.env.num_states, self.num_actions)), dtype=torch.float64)
-            all_trajectories = torch.zeros(self.hyper_params["T"], self.num_classes, self.num_classes * self.feature_dim, dtype=torch.float32)
-            all_feedbacks = torch.zeros(self.hyper_params["T"], dtype=torch.int64)
-            self.w_estimate = torch.zeros(self.num_classes * self.feature_dim, dtype=torch.float32)
+        theta = torch.as_tensor(self.rng.random((self.env.num_states, self.num_actions)), dtype=torch.float64)
+        all_trajectories = torch.zeros(self.hyper_params["T"], self.num_classes, self.num_classes * self.feature_dim, dtype=torch.float32)
+        all_feedbacks = torch.zeros(self.hyper_params["T"], dtype=torch.int64)
+        self.w_estimate = torch.zeros(self.num_classes * self.feature_dim, dtype=torch.float32)
+
+        theta = torch.as_tensor(self.rng.random((self.env.num_states, self.num_actions)), dtype=torch.float64)
+        all_trajectories = torch.zeros(self.hyper_params["T"], self.num_classes, self.num_classes * self.feature_dim, dtype=torch.float32)
+        all_feedbacks = torch.zeros(self.hyper_params["T"], dtype=torch.int64)
+        self.w_estimate = torch.zeros(self.num_classes * self.feature_dim, dtype=torch.float32)
             
-            for t in range(T):
-                if t % self.hyper_params["print_frequency"] == 0:
-                    print(f'Episode {t}/{T}')
-                if self.hyper_params["train_policy"]:
-                    while True:
-                        prev_theta = np.copy(theta)
-                        trajectories = [self.generate_trajectory(theta) for _ in range(200)]
-                        # rewards = [self.compute_estimated_reward(self.w_estimate, traj) for traj in trajectories]
-                        rewards = [self.compute_optimistic_reward(self.w_estimate, traj, t+1) for traj in trajectories]
+        for t in range(T):
+            if t % self.hyper_params["print_frequency"] == 0:
+                print(f'Episode {t}/{T}')
+                
+            if self.hyper_params["train_policy"]:
+                while True:
+                    prev_theta = np.copy(theta)
+                    trajectories = [self.generate_trajectory(theta) for _ in range(200)]
+                    rewards_est = [self.compute_optimistic_reward(self.w_estimate, traj, t+1) for traj in trajectories]
 
-                        grad = self.compute_policy_gradient(theta, trajectories, rewards)
-                        theta += self.hyper_params["alpha"] * grad
-                        
-                        if np.linalg.norm(theta - prev_theta) <= self.hyper_params["epsilon"]:
-                            # print(np.linalg.norm(theta - prev_theta))
-                            break
-
-                trajectory = self.generate_trajectory(theta)
-                if self.hyper_params["use_env_reward"]:
-                    feedback = trajectory[2]
-                else:
-                    feedback_probs = self.true_feedback_prob(trajectory)
-                    feedback = torch.tensor(self.rng.choice(self.num_classes, p=feedback_probs.numpy()))
-
-                all_trajectories[t, :] = self.compute_feature_matrix(trajectory)
-                all_feedbacks[t] = feedback
-
-                if (t + 1) % self.hyper_params["update_interval"] == 0:
-                    self.inner_loop_pgd(all_trajectories[:t+1, :], all_feedbacks[:t+1])
-                    # print(f'w estimate at episode {t+1}', w_estimate)
+                    grad = self.compute_policy_gradient(theta, trajectories, rewards_est)
+                    theta += self.hyper_params["alpha"] * grad
                     
-                    # error = estimation_error(w_estimate, omega_star)
-                    # est_errors_all_runs[run, t] = error
+                    if np.linalg.norm(theta - prev_theta) <= self.hyper_params["epsilon"]:
+                        break
 
-                if self.hyper_params["train_policy"]:
-                    eval_trajectories = [self.generate_trajectory(theta) for _ in range(200)]
-                    true_rewards = [self.compute_true_reward(traj) for traj in eval_trajectories]
-                    reward_all_runs[run, t] = np.mean(true_rewards)
+            trajectory = self.generate_trajectory(theta)
+            if self.hyper_params["use_env_reward"]:
+                feedback = trajectory[2]
+            else:
+                feedback_probs = self.true_feedback_prob(trajectory)
+                feedback = torch.tensor(self.rng.choice(self.num_classes, p=feedback_probs.numpy()))
 
-        return reward_all_runs
+            all_trajectories[t, :] = self.compute_feature_matrix(trajectory)
+            all_feedbacks[t] = feedback
+
+            if (t + 1) % self.hyper_params["update_interval"] == 0:
+                self.inner_loop_pgd(all_trajectories[:t+1, :], all_feedbacks[:t+1])
+
+            if self.hyper_params["train_policy"]:
+                eval_trajectories = [self.generate_trajectory(theta) for _ in range(200)]
+                true_rewards = [self.compute_true_reward(traj) for traj in eval_trajectories]
+                rewards[t] = np.mean(true_rewards)
+
+        return rewards
     
 
 
@@ -240,28 +240,53 @@ if __name__ == "__main__":
         -3.5125, -0.2810, -2.2345,  1.1508]), dtype=torch.float32)
     
 
-   
-    num_runs = 1
-    trainer = Trainer(hyper_params, omega_star)
-    reward_all_runs = trainer.run_full_algorithm(num_runs)
-    print(trainer.w_estimate)
-    
-    
-    avg_rewards = np.mean(reward_all_runs, axis=0)
-    std_rewards = np.std(reward_all_runs, axis=0)
-    
-    plt.figure(figsize=(10, 6))
+    output_dir = "run_results"
+    os.makedirs(output_dir, exist_ok=True)
 
-    plt.rcParams['font.family'] = 'Times New Roman'
-    plt.plot(range(hyper_params["T"]), avg_rewards, label='Average True Reward')
-    plt.fill_between(range(hyper_params["T"]),
-                     avg_rewards - 2 * std_rewards,
-                     avg_rewards + 2 * std_rewards,
-                     color='b', alpha=0.2, label="95% Confidence Interval")
-    plt.xlabel('Episodes', fontsize=20)
-    plt.ylabel('Average True Reward', fontsize=20)
-    plt.title('Average Reward vs. Episodes', fontsize=20)
-    plt.legend(fontsize=18)
-    plt.xticks(fontsize=18)
-    plt.yticks(fontsize=18)
-    plt.show()
+    import sys
+    run_seed = int(sys.argv[1]) if len(sys.argv) > 1 else 1235
+
+    trainer = Trainer(hyper_params, omega_star)
+    rewards, final_w_estimate = trainer.run_full_algorithm(run_seed)
+
+    # Save results
+    results = {
+        "seed": run_seed,
+        "rewards": rewards.tolist(),
+        "final_w_estimate": final_w_estimate.tolist(),
+        "hyper_params": hyper_params
+    }
+
+    output_file = os.path.join(output_dir, f"run_seed_{run_seed}.json")
+    with open(output_file, 'w') as f:
+        json.dump(results, f)
+
+    print(f"Results saved to {output_file}")
+
+    
+
+   
+    # num_runs = 1
+    # trainer = Trainer(hyper_params, omega_star)
+    # reward_all_runs = trainer.run_full_algorithm(num_runs)
+    # print(trainer.w_estimate)
+    
+    
+    # avg_rewards = np.mean(reward_all_runs, axis=0)
+    # std_rewards = np.std(reward_all_runs, axis=0)
+    
+    # plt.figure(figsize=(10, 6))
+
+    # plt.rcParams['font.family'] = 'Times New Roman'
+    # plt.plot(range(hyper_params["T"]), avg_rewards, label='Average True Reward')
+    # plt.fill_between(range(hyper_params["T"]),
+    #                  avg_rewards - 2 * std_rewards,
+    #                  avg_rewards + 2 * std_rewards,
+    #                  color='b', alpha=0.2, label="95% Confidence Interval")
+    # plt.xlabel('Episodes', fontsize=20)
+    # plt.ylabel('Average True Reward', fontsize=20)
+    # plt.title('Average Reward vs. Episodes', fontsize=20)
+    # plt.legend(fontsize=18)
+    # plt.xticks(fontsize=18)
+    # plt.yticks(fontsize=18)
+    # plt.show()
